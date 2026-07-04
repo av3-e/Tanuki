@@ -255,9 +255,7 @@ class DependencySolver:
                     if self._dep_met(alt, repo_index):
                         satisfied = True
                         if alt.name.lower() not in self.installed_versions:
-                            if repo_index.get(alt.name.lower()):
-                                if alt.name.lower() not in seen and alt.name.lower() not in resolved:
-                                    to_visit.append(alt.name.lower())
+                            self._add_to_visit(alt.name.lower(), repo_index, to_visit, seen, resolved)
                         break
                 if not satisfied:
                     alt_names = [a.name for a in group]
@@ -273,9 +271,7 @@ class DependencySolver:
                     if self._dep_met(alt, repo_index):
                         satisfied = True
                         if alt.name.lower() not in self.installed_versions:
-                            if repo_index.get(alt.name.lower()):
-                                if alt.name.lower() not in seen and alt.name.lower() not in resolved:
-                                    to_visit.append(alt.name.lower())
+                            self._add_to_visit(alt.name.lower(), repo_index, to_visit, seen, resolved)
                         break
                 if not satisfied:
                     alt_names = [a.name for a in group]
@@ -307,6 +303,28 @@ class DependencySolver:
                 if dep.name.lower() in provides:
                     return version_satisfies(p.version, dep.version_req)
         return False
+
+    def _find_providers(self, name: str, repo_index) -> List[str]:
+        providers = []
+        target = name.lower()
+        for pkgs in repo_index._packages.values():
+            for p in pkgs:
+                for prov in _parse_provides(p.provides or ""):
+                    if prov == target:
+                        providers.append(p.package.lower())
+                        break
+        return providers
+
+    def _add_to_visit(self, name: str, repo_index, to_visit: list, seen: set, resolved: list):
+        lower = name.lower()
+        if lower in seen or lower in resolved:
+            return
+        if repo_index.get(lower):
+            to_visit.append(lower)
+            return
+        for prov in self._find_providers(lower, repo_index):
+            if prov not in seen and prov not in resolved and prov not in self.installed_versions:
+                to_visit.append(prov)
 
 
 def _parse_provides(raw: str) -> List[str]:

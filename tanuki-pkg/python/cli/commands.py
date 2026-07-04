@@ -224,18 +224,18 @@ class Commands:
         if not prompt_yes_no("Proceed with installation?"):
             return
 
-        cache = self.cache_path
+        cache_dir = self.cache_path
 
-        for i, dep_name in enumerate(to_install):
+        for i, dep_name in enumerate(reversed(to_install)):
             dep_candidates = repo.index.get(dep_name)
             if not dep_candidates:
                 print_error(f"Package '{dep_name}' resolved but not found in index")
                 continue
             dep_info = dep_candidates[0]
-            deb_path = cache / Path(dep_info.filename).name
+            deb_path = cache_dir / Path(dep_info.filename).name
 
             if not deb_path.exists():
-                repo.download_deb(dep_info.filename, cache, label=dep_name)
+                repo.download_deb(dep_info.filename, cache_dir, label=dep_name)
             else:
                 print_info(f"Using cached {dep_name}")
 
@@ -247,8 +247,7 @@ class Commands:
                 print_info(f"Downloaded {dep_name} (download-only mode)")
                 continue
 
-            is_explicit = explicit and (i == len(to_install) - 1
-                                        or dep_name == name.lower())
+            is_explicit = explicit and (dep_name == name.lower())
             self._install_deb(deb_path, dep_info, explicit=is_explicit,
                                force=force, foreign_files=foreign_files)
 
