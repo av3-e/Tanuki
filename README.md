@@ -1,6 +1,6 @@
 Hai :3
 # TanukiPKG - what is this?
-A package manager that fetches from the debian repos and installs DEBIAN packages onto your system. 
+A package manager that fetches from the debian repos and installs DEBIAN packages onto your non-debian system.
 
 
 ## Why TanukiPKG over DebTap?
