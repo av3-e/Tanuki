@@ -14,7 +14,7 @@ no.
  Python 3.12+ 
  Lupa (python3-lupa)
 **Optional:**
-- `zstd` for .zst compressed debs
-- `gpgv` GPG verification
+- ZTSD: for .zst compressed debs
+- gpgv: GPG verification
 
 ```
