@@ -18,3 +18,8 @@ no.
 - gpgv: GPG verification
 
 ```
+## Warning:
+0. This is an experimental project, don't expect it to work properly out of the box.
+1. I am not responsible for your system breaking if you use this.
+2. There are bugs. Lots of them.
+3. :3
