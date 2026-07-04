@@ -17,7 +17,7 @@ from core.host_detect import (
     detect_distro, detect_architecture, get_distro_family,
     make_path_rewrite,
 )
-from core.repository import Repository, verify_checksum
+from core.repository import Repository, RepositoryIndex, verify_checksum
 from core.package import DebPackage, ControlInfo
 
 TANUKI_ROOT = Path(os.environ.get(
@@ -110,6 +110,9 @@ class Commands:
             architectures = self.config.get("architectures",
                                             [self.config.get("arch", "amd64")])
             self.repo = Repository(mirror, suite, components, architectures)
+            cache_file = self.db_path / "repo-index.json"
+            if cache_file.exists():
+                self.repo.index = RepositoryIndex.load(cache_file)
         return self.repo
 
     def _require_root(self):
@@ -158,7 +161,7 @@ class Commands:
             if not repo.index._packages:
                 repo.update()
 
-            host_pkgs = detect_host_packages()
+            host_pkgs = detect_host_packages(extra_lib_map=repo.lib_mapping or None)
             if host_pkgs:
                 self.solver.load_installed(host_pkgs)
             installed_pkgs = self.db.get_all_packages()
@@ -318,6 +321,8 @@ class Commands:
 
         self._restore_conffiles(saved_conffiles)
 
+        self._run_ldconfig(rewritten_files, root)
+
         if "postinst" in pkg.scripts:
             self._run_script(name, "postinst", pkg.scripts["postinst"], "configure")
 
@@ -368,9 +373,37 @@ class Commands:
                                   f"keeping new version (old saved as .tanuki-old)")
                 Path(backup).unlink(missing_ok=True)
 
+    def _run_ldconfig(self, files: List[str], root: Path):
+        lib_paths = ("/usr/lib", "/lib", "/usr/local/lib", "/usr/lib64", "/lib64")
+        has_so = any(
+            f.startswith(p.lstrip("/")) and ".so" in f.rsplit("/", 1)[-1]
+            for f in files
+            for p in lib_paths
+        )
+        if has_so:
+            try:
+                ldconfig = shutil.which("ldconfig") or "/sbin/ldconfig"
+                subprocess.run([ldconfig], timeout=30, capture_output=True)
+            except Exception:
+                pass
+
     def _run_script(self, name: str, script_type: str, content: str, action: str,
                     fatal: bool = False) -> bool:
         print_info(f"Running {script_type} for {name}...")
+        env = {**os.environ, "DPKG_MAINTSCRIPT_NAME": script_type,
+               "DPKG_MAINTSCRIPT_PACKAGE": name}
+        shim_dir = getattr(self, "_shim_dir", None)
+        if shim_dir is None and self.db_path:
+            from core.dpkg_shim import setup_shim
+            arch = detect_architecture()
+            try:
+                shim_dir = setup_shim(self.db_path, arch)
+                self._shim_dir = shim_dir
+            except Exception:
+                pass
+        if shim_dir:
+            bin_path = str(shim_dir / "bin")
+            env["PATH"] = f"{bin_path}:{env.get('PATH', '')}"
         try:
             proc = subprocess.run(
                 ["/bin/sh", "-e"],
@@ -378,8 +411,7 @@ class Commands:
                 capture_output=True,
                 text=True,
                 timeout=300,
-                env={**os.environ, "DPKG_MAINTSCRIPT_NAME": script_type,
-                     "DPKG_MAINTSCRIPT_PACKAGE": name},
+                env=env,
             )
             if proc.returncode != 0:
                 msg = f"{script_type} returned {proc.returncode}"
@@ -452,7 +484,7 @@ class Commands:
             if not prompt_yes_no("Proceed with upgrade?"):
                 return
 
-            host_pkgs = detect_host_packages()
+            host_pkgs = detect_host_packages(extra_lib_map=self._get_repo().lib_mapping or None)
             if host_pkgs:
                 self.solver.load_installed(host_pkgs)
             self.solver.load_installed(
@@ -591,6 +623,10 @@ class Commands:
             if not prompt_yes_no("Continue without verification?"):
                 return
         repo.update()
+        try:
+            repo.index.save(self.db_path / "repo-index.json")
+        except Exception:
+            pass
         print_success(f"Index updated ({len(repo.index)} packages loaded)")
 
 

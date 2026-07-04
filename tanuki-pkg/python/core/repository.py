@@ -9,7 +9,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from typing import Optional, Dict, List, Iterator
 from urllib.request import urlopen, Request
 from urllib.parse import urljoin
@@ -151,6 +151,29 @@ class RepositoryIndex:
     def __len__(self) -> int:
         return sum(len(v) for v in self._packages.values())
 
+    def save(self, path: Path):
+        import json
+        data = []
+        for pkgs in self._packages.values():
+            for p in pkgs:
+                d = {k: v for k, v in asdict(p).items() if v}
+                data.append(d)
+        path.write_text(json.dumps(data, indent=1))
+
+    @classmethod
+    def load(cls, path: Path) -> "RepositoryIndex":
+        import json
+        idx = cls()
+        try:
+            data = json.loads(path.read_text())
+            for d in data:
+                raw = d.pop("raw", {})
+                pkg = RepoPackage(**d, raw=raw)
+                idx.add([pkg])
+        except Exception:
+            pass
+        return idx
+
 
 class Repository:
 
@@ -162,6 +185,7 @@ class Repository:
         self.components = components or ["main", "contrib", "non-free-firmware", "non-free"]
         self.architectures = architectures or ["amd64"]
         self.index = RepositoryIndex()
+        self.lib_mapping: Dict[str, str] = {}
 
     def _packages_url(self, component: str, arch: str) -> str:
         return (
@@ -175,8 +199,23 @@ class Repository:
             f"binary-{arch}/Packages.gz"
         )
 
+    def _contents_url(self, arch: str, ext: str) -> str:
+        return f"{self.base_url}/dists/{self.suite}/Contents-{arch}.{ext}"
+
     def _deb_url(self, filename: str) -> str:
         return f"{self.base_url}/{filename}"
+
+    def _fetch_lib_mapping(self):
+        headers = {"User-Agent": "Tanuki/0.2.0"}
+        for arch in self.architectures:
+            url = self._contents_url(arch, "xz")
+            text = _fetch_decompressed(url, headers)
+            if text is None:
+                url = self._contents_url(arch, "gz")
+                text = _fetch_decompressed(url, headers)
+            if text is None:
+                continue
+            self.lib_mapping.update(_parse_contents_libs(text, arch))
 
     def update(self):
         self.index = RepositoryIndex()
@@ -193,6 +232,8 @@ class Repository:
                     continue
                 packages = parse_packages(text)
                 self.index.add(packages)
+
+        self._fetch_lib_mapping()
 
     def verify_release(self, keyring: Optional[Path] = None) -> bool:
         if os.environ.get("TANUKI_SKIP_GPG"):
@@ -342,6 +383,32 @@ def _fetch_raw(url: str, headers: Dict[str, str]) -> Optional[bytes]:
             return resp.read()
     except Exception:
         return None
+
+
+_RE_SO_FILE = re.compile(r"/(?:lib|usr/lib)/.*\.so\b")
+
+
+def _parse_contents_libs(text: str, arch_hint: str) -> Dict[str, str]:
+    mapping: Dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("!"):
+            continue
+        parts = line.split(None, 1)
+        if len(parts) < 2:
+            continue
+        fpath, remainder = parts
+        if not fpath.startswith("lib/") and not fpath.startswith("usr/lib/"):
+            continue
+        if not fpath.rsplit("/", 1)[-1].startswith("lib"):
+            continue
+        base = fpath.rsplit("/", 1)[-1]
+        if ".so" not in base:
+            continue
+        pkg_name = remainder.split(",")[0].strip().rstrip(",")
+        if base and pkg_name and base not in mapping:
+            mapping[base] = pkg_name
+    return mapping
 
 
 def _verify_inrelease(data: bytes, keyring: Optional[Path] = None) -> bool:

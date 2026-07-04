@@ -1104,13 +1104,13 @@ _HAS_SEEDED = False
 _CACHED: Dict[str, str] = {}
 
 
-def detect_host_packages() -> Dict[str, str]:
+def detect_host_packages(extra_lib_map: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     global _HAS_SEEDED, _CACHED
 
     if os.environ.get("TANUKI_IGNORE_HOST"):
         return {}
 
-    if _HAS_SEEDED:
+    if _HAS_SEEDED and extra_lib_map is None:
         return _CACHED
 
     result: Dict[str, str] = {}
@@ -1118,7 +1118,11 @@ def detect_host_packages() -> Dict[str, str]:
     ldconfig_map = _get_ldconfig_paths()
     search_paths = get_library_search_paths()
 
-    for lib_name, debian_name in LIB_MAP.items():
+    combined_map = dict(LIB_MAP)
+    if extra_lib_map:
+        combined_map.update(extra_lib_map)
+
+    for lib_name, debian_name in combined_map.items():
         found = False
         ldconfig_path = ldconfig_map.get(lib_name)
         if ldconfig_path and os.path.exists(ldconfig_path):
@@ -1134,6 +1138,7 @@ def detect_host_packages() -> Dict[str, str]:
         if shutil.which(bin_name) and debian_name not in result:
             result[debian_name] = HOST_VERSION_SENTINEL
 
-    _HAS_SEEDED = True
-    _CACHED = result
+    if extra_lib_map is None:
+        _HAS_SEEDED = True
+        _CACHED = result
     return result
