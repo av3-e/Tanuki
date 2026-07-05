@@ -169,6 +169,8 @@ class Commands:
                 {p.name: p.version for p in installed_pkgs}
             )
             self.solver.load_installed_metadata(installed_pkgs)
+            if host_pkgs:
+                self.solver.register_host_metadata(host_pkgs, repo.index)
 
             if not force:
                 foreign_files = get_foreign_pm_files()
@@ -229,12 +231,17 @@ class Commands:
 
         cache_dir = self.cache_path
 
+        target_arch = self.config.get("arch", detect_architecture())
         for i, dep_name in enumerate(reversed(to_install)):
             dep_candidates = repo.index.get(dep_name)
             if not dep_candidates:
                 print_error(f"Package '{dep_name}' resolved but not found in index")
                 continue
             dep_info = dep_candidates[0]
+            if target_arch:
+                arch_match = [c for c in dep_candidates if c.architecture == target_arch]
+                if arch_match:
+                    dep_info = arch_match[0]
             deb_path = cache_dir / Path(dep_info.filename).name
 
             if not deb_path.exists():
@@ -491,6 +498,8 @@ class Commands:
                 {p.name: p.version for p in installed}
             )
             self.solver.load_installed_metadata(installed)
+            if host_pkgs:
+                self.solver.register_host_metadata(host_pkgs, self._get_repo().index)
 
             foreign_files = get_foreign_pm_files() if not force else {}
 
@@ -509,8 +518,17 @@ class Commands:
                 return
 
             cache = self.cache_path
+            upgrade_arch = self.config.get("arch", detect_architecture())
             for dep_name in to_install:
-                dep_info = repo.index.get(dep_name)[0]
+                dep_candidates = repo.index.get(dep_name)
+                if not dep_candidates:
+                    print_error(f"Package '{dep_name}' resolved but not found")
+                    continue
+                dep_info = dep_candidates[0]
+                if upgrade_arch:
+                    arch_match = [c for c in dep_candidates if c.architecture == upgrade_arch]
+                    if arch_match:
+                        dep_info = arch_match[0]
 
                 if dep_info.sha256 or dep_info.md5sum:
                     deb_check = cache / Path(dep_info.filename).name

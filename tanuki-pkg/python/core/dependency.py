@@ -315,6 +315,30 @@ class DependencySolver:
                         break
         return providers
 
+    def register_host_metadata(self, host_pkgs: Dict[str, str], repo_index):
+        for name, version in host_pkgs.items():
+            candidates = repo_index.get(name)
+            if not candidates:
+                continue
+            pkg = candidates[0]
+            name_lower = pkg.package.lower()
+            if pkg.conflicts:
+                self.installed_conflicts[name_lower] = [
+                    d.name.lower() for g in parse_deps(pkg.conflicts) for d in g
+                ]
+            if pkg.breaks:
+                self.installed_breaks[name_lower] = [
+                    d.name.lower() for g in parse_deps(pkg.breaks) for d in g
+                ]
+            if pkg.provides:
+                for g in parse_deps(pkg.provides):
+                    for d in g:
+                        self.installed_provides.setdefault(d.name.lower(), []).append(name_lower)
+            if pkg.replaces:
+                self.installed_replaces[name_lower] = [
+                    d.name.lower() for g in parse_deps(pkg.replaces) for d in g
+                ]
+
     def _add_to_visit(self, name: str, repo_index, to_visit: list, seen: set, resolved: list):
         lower = name.lower()
         if lower in seen or lower in resolved:

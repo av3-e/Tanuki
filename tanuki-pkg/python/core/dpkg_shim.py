@@ -90,25 +90,32 @@ def shim_main() -> int:
         return 0
 
     if args[0] == "--configure":
+        if len(args) > 1:
+            print(f"dpkg-shim: --configure ignored for {args[1]}", file=sys.stderr)
         return 0
 
     if args[0] in ("--unpack", "--audit"):
+        if len(args) > 1:
+            print(f"dpkg-shim: {' '.join(args)} ignored", file=sys.stderr)
         return 0
 
     if args[0].startswith("--no-triggers") or args[0].startswith("--force-"):
         rest = [a for a in args if not a.startswith("--")]
         if rest:
-            if args[0].startswith("--force-"):
-                from core.package import DebPackage
-            pass
-        if rest:
-            return _try_install_or_remove(rest)
+            print(f"dpkg-shim: stubbed {' '.join(rest)}", file=sys.stderr)
+            return 0
+        return 0
+
+    if args[0].startswith("-"):
+        print(f"dpkg-shim: stubbed dpkg {' '.join(args)}", file=sys.stderr)
         return 0
 
     return _try_install_or_remove(args)
 
 
 def _try_install_or_remove(args: list) -> int:
+    if args:
+        print(f"dpkg-shim: ignoring dpkg {' '.join(args)}", file=sys.stderr)
     return 0
 
 
@@ -161,20 +168,22 @@ def _cmd_list_files(args: list) -> int:
         print("dpkg: --listfiles requires a package name", file=sys.stderr)
         return 1
     db = _get_db()
-    if db:
-        files = db.get_files(args[0])
-        for f in files:
-            print("/" + f.lstrip("/"))
+    if not db:
+        return 0
+    files = db.get_files(args[0])
+    for f in files:
+        print("/" + f.lstrip("/"))
     return 0
 
 
 def _cmd_search_files(args: list) -> int:
+    db = _get_db()
+    if not db:
+        return 0
     for arg in args:
-        db = _get_db()
-        if db:
-            owner = db.file_owned_by(arg)
-            if owner:
-                print(f"{owner}: {arg}")
+        owner = db.file_owned_by(arg)
+        if owner:
+            print(f"{owner}: {arg}")
     return 0
 
 
@@ -186,6 +195,11 @@ def _cmd_status(args: list) -> int:
             print(f"Package: {pkg.name}")
             print(f"Status: install ok installed")
             print(f"Version: {pkg.version}")
+            print(f"Architecture: {pkg.architecture}")
+            if pkg.depends:
+                print(f"Depends: {pkg.depends}")
+            if pkg.provides:
+                print(f"Provides: {pkg.provides}")
         else:
             print(f"Package: {name}")
             print(f"Status: install ok not-installed")
@@ -196,10 +210,27 @@ def _cmd_query(args: list) -> int:
     db = _get_db()
     fmt = "default"
     if args and args[0] == "-f":
-        args = args[2:]
+        if len(args) >= 3:
+            fmt = args[1]
+            args = args[2:]
+        elif len(args) == 2:
+            fmt = args[1]
+            args = []
+        else:
+            return 1
+    if not db:
+        for name in args:
+            print(f"{name}\t(none)")
+        return 0
     for name in args:
-        pkg = db.get_package(name) if db else None
-        if pkg:
+        pkg = db.get_package(name)
+        if pkg and fmt != "default":
+            line = fmt
+            subs = [("Package", pkg.name), ("Version", pkg.version), ("Architecture", pkg.architecture), ("db-fsys:Version", pkg.version), ("Status", "install ok installed")]
+            for k, v in subs:
+                line = line.replace("${" + k + "}", v)
+            print(line, end="")
+        elif pkg:
             print(f"{pkg.name}\t{pkg.version}")
         else:
             print(f"{name}\t(none)")
