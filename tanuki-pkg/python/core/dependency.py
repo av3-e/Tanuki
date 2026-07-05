@@ -164,7 +164,8 @@ def version_satisfies(actual: str, requirement: Optional[str]) -> bool:
 
 class DependencySolver:
 
-    def __init__(self):
+    def __init__(self, target_arch: Optional[str] = None):
+        self.target_arch = target_arch
         self.provided: Dict[str, str] = {}
         self.conflict_map: Dict[str, List[str]] = {}
         self.installed_versions: Dict[str, str] = {}
@@ -172,6 +173,7 @@ class DependencySolver:
         self.installed_provides: Dict[str, List[str]] = {}
         self.installed_breaks: Dict[str, List[str]] = {}
         self.installed_replaces: Dict[str, List[str]] = {}
+        self.with_recommends = False
 
     def load_installed(self, installed_map: Dict[str, str]):
         self.installed_versions.update(installed_map)
@@ -244,7 +246,7 @@ class DependencySolver:
             if not candidates:
                 raise RuntimeError(f"Package '{name}' not found in repository index")
 
-            pkg = candidates[0]
+            pkg = self._pick_candidate(candidates)
             if pkg.package.lower() not in resolved:
                 resolved.append(pkg.package.lower())
 
@@ -263,6 +265,19 @@ class DependencySolver:
                         f"Dependency not satisfied for '{pkg.package}': "
                         f"{' | '.join(alt_names)}"
                     )
+
+            if self.with_recommends:
+                recs = parse_deps(pkg.recommends or "")
+                for group in recs:
+                    for alt in group:
+                        if not self._dep_met(alt, repo_index):
+                            continue
+                        if alt.name.lower() not in self.installed_versions and alt.name.lower() not in seen:
+                            try:
+                                self._add_to_visit(alt.name.lower(), repo_index, to_visit, seen, resolved)
+                            except Exception:
+                                pass
+                            break
 
             pre_deps = parse_deps(pkg.pre_depends or "")
             for group in pre_deps:
@@ -290,7 +305,8 @@ class DependencySolver:
             )
         candidates = repo_index.get(dep.name)
         if candidates:
-            return version_satisfies(candidates[0].version, dep.version_req)
+            best = self._pick_candidate(candidates)
+            return version_satisfies(best.version, dep.version_req)
         if dep.name.lower() in self.installed_provides:
             for provider in self.installed_provides[dep.name.lower()]:
                 if provider in self.installed_versions:
@@ -299,16 +315,27 @@ class DependencySolver:
                     )
         for pkgs in repo_index._packages.values():
             for p in pkgs:
+                if self.target_arch and p.architecture != self.target_arch:
+                    continue
                 provides = _parse_provides(p.provides)
                 if dep.name.lower() in provides:
                     return version_satisfies(p.version, dep.version_req)
         return False
+
+    def _pick_candidate(self, candidates):
+        if self.target_arch:
+            for c in candidates:
+                if c.architecture == self.target_arch:
+                    return c
+        return candidates[0]
 
     def _find_providers(self, name: str, repo_index) -> List[str]:
         providers = []
         target = name.lower()
         for pkgs in repo_index._packages.values():
             for p in pkgs:
+                if self.target_arch and p.architecture != self.target_arch:
+                    continue
                 for prov in _parse_provides(p.provides or ""):
                     if prov == target:
                         providers.append(p.package.lower())
@@ -320,7 +347,7 @@ class DependencySolver:
             candidates = repo_index.get(name)
             if not candidates:
                 continue
-            pkg = candidates[0]
+            pkg = self._pick_candidate(candidates)
             name_lower = pkg.package.lower()
             if pkg.conflicts:
                 self.installed_conflicts[name_lower] = [

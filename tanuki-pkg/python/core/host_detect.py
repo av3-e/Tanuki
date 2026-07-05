@@ -1103,6 +1103,56 @@ def _get_apk_files() -> Set[str]:
 _HAS_SEEDED = False
 _CACHED: Dict[str, str] = {}
 
+VERSION_DETECTORS: Dict[str, list] = {
+    "python3": ["python3", "--version"],
+    "perl": ["perl", "-e", "print $^V"],
+    "bash": ["bash", "--version"],
+    "zsh": ["zsh", "--version"],
+    "fish": ["fish", "--version"],
+    "gcc": ["gcc", "--version"],
+    "g++": ["g++", "--version"],
+    "clang": ["clang", "--version"],
+    "make": ["make", "--version"],
+    "cmake": ["cmake", "--version"],
+    "git": ["git", "--version"],
+    "curl": ["curl", "--version"],
+    "wget": ["wget", "--version"],
+    "ruby": ["ruby", "--version"],
+    "lua5.4": ["lua5.4", "-v"],
+    "nodejs": ["node", "--version"],
+    "php": ["php", "--version"],
+    "vim": ["vim", "--version"],
+    "nvim": ["nvim", "--version"],
+    "emacs": ["emacs", "--version"],
+    "less": ["less", "--version"],
+    "sudo": ["sudo", "--version"],
+    "ssh": ["ssh", "-V"],
+    "rsync": ["rsync", "--version"],
+    "systemd": ["systemctl", "--version"],
+    "tar": ["tar", "--version"],
+    "gzip": ["gzip", "--version"],
+    "xz-utils": ["xz", "--version"],
+    "bzip2": ["bzip2", "--version"],
+    "unzip": ["unzip", "--version"],
+    "zstd": ["zstd", "--version"],
+}
+
+
+def _try_detect_version(bin_name: str, debian_name: str) -> str:
+    cmd = VERSION_DETECTORS.get(debian_name)
+    if not cmd:
+        return HOST_VERSION_SENTINEL
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        out = (proc.stdout or proc.stderr or "").strip()
+        import re as _re
+        m = _re.search(r"(\d+\.\d+(?:\.\d+)?)", out)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return HOST_VERSION_SENTINEL
+
 
 def detect_host_packages(extra_lib_map: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     global _HAS_SEEDED, _CACHED
@@ -1126,17 +1176,17 @@ def detect_host_packages(extra_lib_map: Optional[Dict[str, str]] = None) -> Dict
         found = False
         ldconfig_path = ldconfig_map.get(lib_name)
         if ldconfig_path and os.path.exists(ldconfig_path):
-            result[debian_name] = HOST_VERSION_SENTINEL
+            result[debian_name] = _try_detect_version(None, debian_name)
             continue
         for search_path in search_paths:
             if (Path(search_path) / lib_name).is_file():
-                result[debian_name] = HOST_VERSION_SENTINEL
+                result[debian_name] = _try_detect_version(None, debian_name)
                 found = True
                 break
 
     for bin_name, debian_name in BIN_MAP.items():
         if shutil.which(bin_name) and debian_name not in result:
-            result[debian_name] = HOST_VERSION_SENTINEL
+            result[debian_name] = _try_detect_version(bin_name, debian_name)
 
     if extra_lib_map is None:
         _HAS_SEEDED = True

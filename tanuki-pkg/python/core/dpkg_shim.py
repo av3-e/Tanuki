@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import shutil
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -23,7 +24,7 @@ sys.exit(shim_main())
     dpkg_path.write_text(shim_code)
     dpkg_path.chmod(0o755)
 
-    for name in ("dpkg-query", "dpkg-deb", "dpkg-divert"):
+    for name in ("dpkg-query", "dpkg-deb", "dpkg-divert", "dpkg-trigger", "start-stop-daemon"):
         (bin_dir / name).symlink_to("dpkg")
 
     return script_dir
@@ -67,6 +68,9 @@ def shim_main() -> int:
     if not args:
         return 0
 
+    if os.path.basename(sys.argv[0]) == "start-stop-daemon":
+        return 0
+
     if args[0] == "--compare-versions":
         return _cmd_compare_versions(args[1:])
 
@@ -96,7 +100,15 @@ def shim_main() -> int:
 
     if args[0] in ("--unpack", "--audit"):
         if len(args) > 1:
-            print(f"dpkg-shim: {' '.join(args)} ignored", file=sys.stderr)
+            print(f"dpkg-shim: dpkg --unpack stubbed", file=sys.stderr)
+        return 0
+
+    if args[0] in ("--add", "--remove", "--list", "--truename") and os.path.basename(sys.argv[0]) == "dpkg-divert":
+        return _cmd_divert(args)
+
+    if args[0] == "--no-await":
+        if len(args) > 1:
+            return _cmd_trigger(args[1:])
         return 0
 
     if args[0].startswith("--no-triggers") or args[0].startswith("--force-"):
@@ -116,6 +128,100 @@ def shim_main() -> int:
 def _try_install_or_remove(args: list) -> int:
     if args:
         print(f"dpkg-shim: ignoring dpkg {' '.join(args)}", file=sys.stderr)
+    return 0
+
+
+def _get_divert_db():
+    db_dir = Path(os.environ.get("TANUKI_DB_DIR", "/var/lib/tanuki"))
+    div_file = db_dir / "diversions.json"
+    if div_file.exists():
+        try:
+            return json.loads(div_file.read_text())
+        except Exception:
+            return []
+    return []
+
+
+def _save_divert_db(diversions):
+    db_dir = Path(os.environ.get("TANUKI_DB_DIR", "/var/lib/tanuki"))
+    div_file = db_dir / "diversions.json"
+    try:
+        div_file.write_text(json.dumps(diversions, indent=1))
+    except Exception:
+        pass
+
+
+def _cmd_divert(args: list) -> int:
+    action = args[0]
+    rest = args[1:]
+    diversions = _get_divert_db()
+    if action == "--list":
+        for d in diversions:
+            print(f"diversion of {d['orig']} to {d['diverted']} by {d['package']}")
+        return 0
+    elif action == "--truename":
+        if rest:
+            for p in rest:
+                found = [d for d in diversions if d['orig'] == p]
+                print(found[0]['diverted'] if found else p)
+        return 0
+    elif action == "--add":
+        pkg = None
+        divert_to = None
+        rename = False
+        i = 0
+        while i < len(rest):
+            if rest[i] == "--divert":
+                i += 1
+                if i < len(rest):
+                    divert_to = rest[i]
+            elif rest[i] == "--package":
+                i += 1
+                if i < len(rest):
+                    pkg = rest[i]
+            elif rest[i] == "--rename":
+                rename = True
+            elif not rest[i].startswith("--"):
+                orig = rest[i]
+                if divert_to:
+                    diversions = [d for d in diversions if d['orig'] != orig]
+                    diversions.append({"orig": orig, "diverted": divert_to, "package": pkg or "unknown", "rename": rename})
+                    if rename and os.path.exists(orig) and not os.path.exists(divert_to):
+                        try:
+                            os.rename(orig, divert_to)
+                        except Exception:
+                            pass
+                _save_divert_db(diversions)
+                return 0
+            i += 1
+        return 0
+    elif action == "--remove":
+        if rest:
+            orig = rest[-1] if not rest[-1].startswith("--") else None
+            if orig:
+                removed = [d for d in diversions if d['orig'] != orig]
+                old = next((d for d in diversions if d['orig'] == orig), None)
+                if old and old.get("rename") and os.path.exists(old['diverted']) and not os.path.exists(orig):
+                    try:
+                        os.rename(old['diverted'], orig)
+                    except Exception:
+                        pass
+                _save_divert_db(removed)
+        return 0
+    return 0
+
+
+_trigger_queue: list = []
+
+
+def _cmd_trigger(args: list) -> int:
+    if not args:
+        for t in _trigger_queue:
+            print(t)
+        return 0
+    for a in args:
+        if not a.startswith("-"):
+            _trigger_queue.append(a)
     return 0
 
 

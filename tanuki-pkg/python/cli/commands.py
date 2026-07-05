@@ -1,8 +1,12 @@
 import os
 import sys
+import json
+import time
 import fcntl
 import shutil
+import hashlib
 import subprocess
+import concurrent.futures
 from pathlib import Path
 from typing import List, Optional, Set, Dict
 
@@ -18,7 +22,7 @@ from core.host_detect import (
     make_path_rewrite,
 )
 from core.repository import Repository, RepositoryIndex, verify_checksum
-from core.package import DebPackage, ControlInfo
+from core.package import DebPackage, ControlInfo, rewrite_file_contents, rewrite_shebangs
 
 TANUKI_ROOT = Path(os.environ.get(
     "TANUKI_ROOT",
@@ -48,7 +52,7 @@ class Commands:
         self.cache_path = TANUKI_CACHE
         self._setup()
         self.db = PackageDatabase(self.db_path)
-        self.solver = DependencySolver()
+        self.solver = DependencySolver(target_arch=self.config.get("arch", None))
         self.repo: Repository | None = None
         self._lock_fd = None
         self._lock_count = 0
@@ -147,7 +151,7 @@ class Commands:
 
     def install(self, package_names: List[str], dry_run: bool = False,
                 download_only: bool = False, ignore_deps: bool = False,
-                force: bool = False):
+                force: bool = False, with_recommends: bool = False):
         self._require_root()
         if not package_names:
             print_error("Package name(s) required")
@@ -161,6 +165,15 @@ class Commands:
             if not repo.index._packages:
                 repo.update()
 
+            snapshots_dir = self.db_path / "snapshots"
+            snapshots_dir.mkdir(parents=True, exist_ok=True)
+            pre_snap = snapshots_dir / f"pre-{int(time.time())}.list"
+            try:
+                before = self.db.get_all_packages()
+                pre_snap.write_text("\n".join(f"{p.name}\t{p.version}\t{p.architecture}" for p in before))
+            except Exception:
+                pass
+
             host_pkgs = detect_host_packages(extra_lib_map=repo.lib_mapping or None)
             if host_pkgs:
                 self.solver.load_installed(host_pkgs)
@@ -171,6 +184,7 @@ class Commands:
             self.solver.load_installed_metadata(installed_pkgs)
             if host_pkgs:
                 self.solver.register_host_metadata(host_pkgs, repo.index)
+            self.solver.with_recommends = with_recommends
 
             if not force:
                 foreign_files = get_foreign_pm_files()
@@ -183,7 +197,8 @@ class Commands:
                     self._install_one(pkg_name, repo, dry_run=dry_run,
                                        download_only=download_only, arch=arch,
                                        ignore_deps=ignore_deps, force=force,
-                                       foreign_files=locals().get("foreign_files", {}))
+                                       foreign_files=locals().get("foreign_files", {}),
+                                       with_recommends=with_recommends)
                 except Exception as e:
                     print_error(f"Failed to install {pkg_name}: {e}")
         finally:
@@ -192,7 +207,8 @@ class Commands:
     def _install_one(self, name: str, repo: Repository, dry_run: bool = False,
                      download_only: bool = False, explicit: bool = True,
                      arch: Optional[str] = None, ignore_deps: bool = False,
-                     force: bool = False, foreign_files: Dict[str, Set[str]] = None):
+                     force: bool = False, foreign_files: Dict[str, Set[str]] = None,
+                     with_recommends: bool = False):
         if foreign_files is None:
             foreign_files = {}
 
@@ -232,7 +248,8 @@ class Commands:
         cache_dir = self.cache_path
 
         target_arch = self.config.get("arch", detect_architecture())
-        for i, dep_name in enumerate(reversed(to_install)):
+        to_download = []
+        for dep_name in reversed(to_install):
             dep_candidates = repo.index.get(dep_name)
             if not dep_candidates:
                 print_error(f"Package '{dep_name}' resolved but not found in index")
@@ -243,11 +260,31 @@ class Commands:
                 if arch_match:
                     dep_info = arch_match[0]
             deb_path = cache_dir / Path(dep_info.filename).name
-
             if not deb_path.exists():
-                repo.download_deb(dep_info.filename, cache_dir, label=dep_name)
-            else:
-                print_info(f"Using cached {dep_name}")
+                to_download.append((dep_info.filename, dep_name))
+
+        if to_download:
+            print_info(f"Downloading {len(to_download)} packages...")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                futs = []
+                for fname, dname in to_download:
+                    futs.append(pool.submit(repo.download_deb, fname, cache_dir, dname))
+                for fut in concurrent.futures.as_completed(futs):
+                    try:
+                        fut.result()
+                    except Exception as e:
+                        print_warning(f"Download failed: {e}")
+
+        for dep_name in reversed(to_install):
+            dep_candidates = repo.index.get(dep_name)
+            if not dep_candidates:
+                continue
+            dep_info = dep_candidates[0]
+            if target_arch:
+                arch_match = [c for c in dep_candidates if c.architecture == target_arch]
+                if arch_match:
+                    dep_info = arch_match[0]
+            deb_path = cache_dir / Path(dep_info.filename).name
 
             if not deb_path.exists():
                 print_error(f"Download failed for {dep_name}")
@@ -304,6 +341,11 @@ class Commands:
                 print_info("Use --force to override")
                 return
 
+        existing_pkg = self.db.get_package(name)
+        old_files = []
+        if existing_pkg:
+            old_files = self.db.get_files(name)
+
         self._begin_transaction()
 
         if "preinst" in pkg.scripts:
@@ -327,6 +369,13 @@ class Commands:
             return
 
         self._restore_conffiles(saved_conffiles)
+
+        for f in rewritten_files:
+            try:
+                rewrite_file_contents(root, f, path_rewrite)
+                rewrite_shebangs(root, f)
+            except Exception:
+                pass
 
         self._run_ldconfig(rewritten_files, root)
 
@@ -352,6 +401,18 @@ class Commands:
         self.db.add_files(pkg_id, rewritten_files)
         if pkg.scripts:
             self.db.add_scripts(pkg_id, pkg.scripts)
+        if pkg.triggers:
+            self.db.add_triggers(pkg_id, pkg.triggers)
+
+        if old_files:
+            orphaned = set(old_files) - set(rewritten_files)
+            for of in orphaned:
+                full = root / of.lstrip("/")
+                try:
+                    if full.is_file() or full.is_symlink():
+                        full.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
         self._transaction_files = []
         self._transaction_conffiles = []
@@ -472,10 +533,15 @@ class Commands:
 
             installed = self.db.get_all_packages()
             upgradable = []
+            upgrade_arch = self.config.get("arch", detect_architecture())
             for pkg in installed:
                 candidates = repo.index.get(pkg.name)
                 if not candidates:
                     continue
+                if upgrade_arch:
+                    arch_match = [c for c in candidates if c.architecture == upgrade_arch]
+                    if arch_match:
+                        candidates = arch_match
                 repo_pkg = candidates[0]
                 if _compare_versions(repo_pkg.version, pkg.version) > 0:
                     upgradable.append((pkg.name, pkg.version, repo_pkg.version))
@@ -705,13 +771,99 @@ class Commands:
         print_success(f"Removed {name}")
 
 
-    def list_packages(self):
+    def list_packages(self, show_files: bool = False, pkg_name: Optional[str] = None):
+        if show_files or pkg_name:
+            if pkg_name:
+                names = [pkg_name]
+            else:
+                names = [p.name for p in self.db.get_all_packages()]
+            for n in names:
+                files = self.db.get_files(n)
+                if files:
+                    print_info(f"{n}:")
+                    for f in files:
+                        print(f"  /{f.lstrip('/')}")
+                else:
+                    print_info(f"{n}: (no files tracked)")
+            return
         packages = self.db.get_all_packages()
         if not packages:
             print_info("No packages installed")
             return
         data = [[p.name, p.version, p.architecture] for p in packages]
         print_table(["Package", "Version", "Arch"], data)
+
+
+    def verify(self, pkg_name: Optional[str] = None):
+        import hashlib as _hl
+        repo = self._get_repo()
+        if not repo.index._packages:
+            repo.update()
+        if pkg_name:
+            pkgs = [p for p in self.db.get_all_packages() if p.name == pkg_name]
+        else:
+            pkgs = self.db.get_all_packages()
+        if not pkgs:
+            print_info("No packages to verify")
+            return
+        issues = 0
+        for pkg in pkgs:
+            files = self.db.get_files(pkg.name)
+            for f in files:
+                full = self._resolve_root() / f.lstrip("/")
+                if not full.exists():
+                    print_warning(f"{pkg.name}: missing {f}")
+                    issues += 1
+                    continue
+                candidates = repo.index.get(pkg.name)
+                if not candidates:
+                    continue
+                rp = candidates[0]
+                if rp.sha256:
+                    h = _hl.sha256()
+                    try:
+                        h.update(full.read_bytes())
+                    except Exception:
+                        continue
+                    if h.hexdigest() != rp.sha256:
+                        print_warning(f"{pkg.name}: checksum mismatch {f}")
+                        issues += 1
+        if issues == 0:
+            print_success("All files verified OK")
+        else:
+            print_warning(f"{issues} issue(s) found")
+
+
+    def undo(self):
+        snapshots_dir = self.db_path / "snapshots"
+        snapshots_dir.mkdir(parents=True, exist_ok=True)
+        existing = sorted(snapshots_dir.glob("*.list"))
+        if not existing:
+            print_info("No snapshots to undo to")
+            return
+        latest = existing[-1]
+        print_info(f"Found snapshot: {latest.stem}")
+        if not prompt_yes_no("Restore this snapshot (will remove newer packages)?"):
+            return
+        current = {p.name for p in self.db.get_all_packages()}
+        with open(latest) as f:
+            lines = f.read().strip().split("\n")
+        target = set()
+        for l in lines:
+            parts = l.split("\t")
+            if parts:
+                target.add(parts[0])
+        to_remove = current - target
+        to_install = target - current
+        if to_remove:
+            print_info(f"Removing: {' '.join(to_remove)}")
+            for r in to_remove:
+                self._remove_one_no_lock(r)
+        if to_install:
+            print_info(f"Installing: {' '.join(to_install)}")
+            self.install(list(to_install))
+        latest.unlink(missing_ok=True)
+        print_success("Undo complete")
 
 
     def search(self, query: str):

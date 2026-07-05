@@ -98,6 +98,7 @@ class DebPackage:
         self._scripts: Dict[str, str] = {}
         self._file_list: List[str] = []
         self._conffiles: List[str] = []
+        self._triggers: List[str] = []
         self._read()
 
     def _read(self):
@@ -204,6 +205,7 @@ class DebPackage:
         text = ""
         scripts = {}
         conffiles = []
+        triggers = []
 
         for member in tf.getmembers():
             name = member.name.lstrip("./")
@@ -221,10 +223,16 @@ class DebPackage:
                 if f:
                     content = f.read().decode("utf-8", errors="replace")
                     conffiles = [line.strip() for line in content.split("\n") if line.strip()]
+            elif name == "triggers":
+                f = tf.extractfile(member)
+                if f:
+                    content = f.read().decode("utf-8", errors="replace")
+                    triggers = [line.strip() for line in content.split("\n") if line.strip()]
 
         tf.close()
         self._scripts = scripts
         self._conffiles = conffiles
+        self._triggers = triggers
         self._control = parse_control(text)
 
     def _extract_files(self, data: BinaryIO, compression: str):
@@ -253,6 +261,10 @@ class DebPackage:
     @property
     def files(self) -> List[str]:
         return self._file_list
+
+    @property
+    def triggers(self) -> List[str]:
+        return getattr(self, "_triggers", [])
 
     def extract_data(self, dest: Path, path_rewrite: Optional[Callable[[str], str]] = None):
         with open(self.path, "rb") as f:
@@ -318,6 +330,77 @@ class DebPackage:
                     tf.close()
                     return
         raise RuntimeError("No data archive found in package")
+
+
+MULTIARCH_TRIPLES = [
+    "x86_64-linux-gnu", "aarch64-linux-gnu", "arm-linux-gnueabihf",
+    "arm-linux-gnueabi", "i386-linux-gnu", "mips-linux-gnu",
+    "mips64el-linux-gnuabi64", "mipsel-linux-gnu", "powerpc-linux-gnu",
+    "powerpc64le-linux-gnu", "riscv64-linux-gnu", "s390x-linux-gnu",
+]
+
+
+def rewrite_file_contents(root: Path, file_path: str, path_rewrite: Optional[Callable[[str], str]]):
+    full = root / file_path.lstrip("/")
+    if not full.is_file():
+        return
+    try:
+        raw = full.read_bytes()
+    except Exception:
+        return
+    if not raw:
+        return
+    ext = full.suffix
+    if ext in (".so", ".so.", ".a", ".o", ".pyc", ".png", ".jpg", ".gz"):
+        return
+    is_text = True
+    try:
+        raw.decode("utf-8")
+    except UnicodeDecodeError:
+        is_text = False
+    if not is_text and ext not in (".pc",):
+        return
+    text = raw.decode("utf-8", errors="replace")
+    new_text = text
+    for triple in MULTIARCH_TRIPLES:
+        old = f"/usr/lib/{triple}"
+        new = "/usr/lib"
+        new_text = new_text.replace(old, new)
+    if new_text != text:
+        try:
+            full.write_bytes(new_text.encode("utf-8"))
+        except Exception:
+            pass
+
+
+def rewrite_shebangs(root: Path, file_path: str):
+    full = root / file_path.lstrip("/")
+    if not full.is_file():
+        return
+    try:
+        raw = full.read_bytes()
+    except Exception:
+        return
+    if not raw.startswith(b"#!"):
+        return
+    text = raw.decode("utf-8", errors="replace")
+    first_line = text.split("\n")[0]
+    new_line = first_line
+    subs = [
+        ("/usr/bin/python3", shutil.which("python3") or "/usr/bin/python3"),
+        ("/usr/bin/python", shutil.which("python3") or "/usr/bin/python"),
+        ("/usr/bin/bash", shutil.which("bash") or "/usr/bin/bash"),
+        ("/bin/bash", shutil.which("bash") or "/bin/bash"),
+        ("/bin/sh", shutil.which("sh") or "/bin/sh"),
+    ]
+    for old, new_path in subs:
+        if old in new_line and old != new_path:
+            new_line = new_line.replace(old, new_path)
+    if new_line != first_line:
+        try:
+            full.write_bytes(("\n".join([new_line] + text.split("\n")[1:])).encode("utf-8"))
+        except Exception:
+            pass
 
 
 def parse_control(text: str) -> ControlInfo:

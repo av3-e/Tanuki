@@ -80,6 +80,23 @@ CREATE TABLE IF NOT EXISTS config_files (
     hash TEXT DEFAULT '',
     FOREIGN KEY (package_id) REFERENCES packages(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS diversions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    package TEXT NOT NULL,
+    original_path TEXT NOT NULL,
+    diverted_path TEXT NOT NULL,
+    rename INTEGER DEFAULT 1,
+    UNIQUE(original_path)
+);
+
+CREATE TABLE IF NOT EXISTS package_triggers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    package_id INTEGER NOT NULL,
+    trigger_name TEXT NOT NULL,
+    trigger_type TEXT NOT NULL,
+    FOREIGN KEY (package_id) REFERENCES packages(id) ON DELETE CASCADE
+);
 """
 
 
@@ -382,5 +399,94 @@ class PackageDatabase:
                 (int(explicit), name),
             )
             conn.commit()
+        finally:
+            conn.close()
+
+    def add_diversion(self, pkg: str, orig: str, div: str, rename: int = 1):
+        conn = self._connect()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO diversions (package, original_path, diverted_path, rename) VALUES (?, ?, ?, ?)",
+                (pkg, orig, div, rename),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def remove_diversion(self, orig: str):
+        conn = self._connect()
+        try:
+            conn.execute("DELETE FROM diversions WHERE original_path=?", (orig,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_diversions(self) -> List[Dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute("SELECT * FROM diversions").fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def get_truename(self, path: str) -> str:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT diverted_path FROM diversions WHERE original_path=?", (path,)
+            ).fetchone()
+            return row["diverted_path"] if row else path
+        finally:
+            conn.close()
+
+    def get_original(self, diverted: str) -> Optional[str]:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT original_path FROM diversions WHERE diverted_path=?", (diverted,)
+            ).fetchone()
+            return row["original_path"] if row else None
+        finally:
+            conn.close()
+
+    def add_triggers(self, pkg_id: int, triggers: List[str]):
+        if not triggers:
+            return
+        conn = self._connect()
+        try:
+            for line in triggers:
+                parts = line.strip().split(None, 1)
+                if len(parts) == 2:
+                    ttype, tname = parts
+                    conn.execute(
+                        "INSERT OR IGNORE INTO package_triggers (package_id, trigger_name, trigger_type) VALUES (?, ?, ?)",
+                        (pkg_id, tname, ttype),
+                    )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_interest_triggers(self, trigger_name: str) -> List[str]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """SELECT p.name FROM packages p
+                   JOIN package_triggers pt ON pt.package_id = p.id
+                   WHERE pt.trigger_name=? AND pt.trigger_type IN ('interest', 'interest-await')""",
+                (trigger_name,),
+            ).fetchall()
+            return [r["name"] for r in rows]
+        finally:
+            conn.close()
+
+    def get_package_files_for_verification(self) -> List[Dict]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """SELECT p.name as pkg, p.version, pf.path FROM packages p
+                   JOIN package_files pf ON pf.package_id = p.id
+                   ORDER BY p.name"""
+            ).fetchall()
+            return [dict(r) for r in rows]
         finally:
             conn.close()

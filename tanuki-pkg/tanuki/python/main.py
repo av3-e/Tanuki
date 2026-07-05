@@ -11,7 +11,7 @@ from lua_bridge.bridge import LuaBridge
 
 def _parse_flags(args: list) -> dict:
     flags = {"dry_run": False, "download_only": False, "ignore_deps": False,
-             "force": False, "root": None}
+             "force": False, "root": None, "with_recommends": False, "files": False}
     pkgs = []
     i = 0
     while i < len(args):
@@ -24,6 +24,10 @@ def _parse_flags(args: list) -> dict:
             flags["ignore_deps"] = True
         elif a == "--force":
             flags["force"] = True
+        elif a == "--with-recommends":
+            flags["with_recommends"] = True
+        elif a == "--files":
+            flags["files"] = True
         elif a == "--root":
             i += 1
             if i < len(args):
@@ -64,7 +68,8 @@ def main():
             cmd.install(cmd_args, dry_run=flags["dry_run"],
                         download_only=flags["download_only"],
                         ignore_deps=flags["ignore_deps"],
-                        force=flags["force"])
+                        force=flags["force"],
+                        with_recommends=flags["with_recommends"])
         elif command in ['remove', 'rm']:
             cmd.remove(cmd_args)
         elif command in ['update', 'up', '-u', '--update']:
@@ -72,7 +77,15 @@ def main():
         elif command in ['upgrade', '-U']:
             cmd.upgrade(force=flags["force"])
         elif command in ['list', 'ls']:
-            cmd.list_packages()
+            cmd.list_packages(show_files=flags["files"],
+                              pkg_name=cmd_args[0] if cmd_args else None)
+        elif command in ['files', 'fl']:
+            cmd.list_packages(show_files=True,
+                              pkg_name=cmd_args[0] if cmd_args else None)
+        elif command == 'verify':
+            cmd.verify(cmd_args[0] if cmd_args else None)
+        elif command in ['undo', 'rollback']:
+            cmd.undo()
         elif command == 'search':
             cmd.search(cmd_args[0] if cmd_args else '')
         elif command == 'info':

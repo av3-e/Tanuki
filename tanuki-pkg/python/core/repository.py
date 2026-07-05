@@ -179,31 +179,41 @@ class Repository:
 
     def __init__(self, base_url: str, suite: str = "forky",
                  components: List[str] = None,
-                 architectures: List[str] = None):
+                 architectures: List[str] = None,
+                 fallbacks: Optional[List[str]] = None):
         self.base_url = base_url.rstrip("/")
         self.suite = suite
         self.components = components or ["main", "contrib", "non-free-firmware", "non-free"]
         self.architectures = architectures or ["amd64"]
+        self.fallbacks = fallbacks or [
+            "https://deb.debian.org/debian",
+            "http://ftp.debian.org/debian",
+        ]
+        self._current_mirror = self.base_url
         self.index = RepositoryIndex()
         self.lib_mapping: Dict[str, str] = {}
 
-    def _packages_url(self, component: str, arch: str) -> str:
+    def _packages_url(self, component: str, arch: str, mirror: str = None) -> str:
+        base = (mirror or self._current_mirror).rstrip("/")
         return (
-            f"{self.base_url}/dists/{self.suite}/{component}/"
+            f"{base}/dists/{self.suite}/{component}/"
             f"binary-{arch}/Packages.xz"
         )
 
-    def _packages_gz_url(self, component: str, arch: str) -> str:
+    def _packages_gz_url(self, component: str, arch: str, mirror: str = None) -> str:
+        base = (mirror or self._current_mirror).rstrip("/")
         return (
-            f"{self.base_url}/dists/{self.suite}/{component}/"
+            f"{base}/dists/{self.suite}/{component}/"
             f"binary-{arch}/Packages.gz"
         )
 
-    def _contents_url(self, arch: str, ext: str) -> str:
-        return f"{self.base_url}/dists/{self.suite}/Contents-{arch}.{ext}"
+    def _contents_url(self, arch: str, ext: str, mirror: str = None) -> str:
+        base = (mirror or self._current_mirror).rstrip("/")
+        return f"{base}/dists/{self.suite}/Contents-{arch}.{ext}"
 
-    def _deb_url(self, filename: str) -> str:
-        return f"{self.base_url}/{filename}"
+    def _deb_url(self, filename: str, mirror: str = None) -> str:
+        base = (mirror or self._current_mirror).rstrip("/")
+        return f"{base}/{filename}"
 
     def _fetch_lib_mapping(self):
         headers = {"User-Agent": "Tanuki/0.2.0"}
@@ -217,18 +227,27 @@ class Repository:
                 continue
             self.lib_mapping.update(_parse_contents_libs(text, arch))
 
+    def _try_mirrors(self, url_fn, *args, headers=None) -> Optional[str]:
+        mirrors = [self.base_url] + [m for m in self.fallbacks if m != self.base_url]
+        for mirror in mirrors:
+            url = url_fn(*args, mirror=mirror)
+            text = _fetch_decompressed(url, headers or {})
+            if text is not None:
+                self._current_mirror = mirror
+                return text
+        return None
+
     def update(self):
         self.index = RepositoryIndex()
         headers = {"User-Agent": "Tanuki/0.2.0"}
 
         for comp in self.components:
             for arch in self.architectures:
-                url = self._packages_url(comp, arch)
-                text = _fetch_decompressed(url, headers)
+                text = self._try_mirrors(self._packages_url, comp, arch, headers=headers)
                 if text is None:
-                    url = self._packages_gz_url(comp, arch)
-                    text = _fetch_decompressed(url, headers)
+                    text = self._try_mirrors(self._packages_gz_url, comp, arch, headers=headers)
                 if text is None:
+                    print(f"Warning: no index for {comp}/{arch}", file=sys.stderr)
                     continue
                 packages = parse_packages(text)
                 self.index.add(packages)
@@ -259,13 +278,27 @@ class Repository:
         return False
 
     def download_deb(self, filename: str, dest: Path, label: str = "") -> Path:
-        url = self._deb_url(filename)
-        headers = {"User-Agent": "Tanuki/0.2.0"}
         dest.mkdir(parents=True, exist_ok=True)
         local_name = dest / Path(filename).name
-        _download(url, local_name, headers, label=label)
-        return local_name
+        headers = {"User-Agent": "Tanuki/0.2.0"}
 
+        if local_name.exists():
+            existing = local_name.stat().st_size
+            if existing > 0:
+                headers["Range"] = f"bytes={existing}-"
+
+        mirrors = [self._current_mirror] + [m for m in self.fallbacks if m != self._current_mirror]
+        for mirror in mirrors:
+            url = self._deb_url(filename, mirror=mirror)
+            try:
+                _download(url, local_name, headers, label=label, resume=("Range" in headers))
+                if local_name.exists() and local_name.stat().st_size > 0:
+                    self._current_mirror = mirror
+                    return local_name
+            except Exception as e:
+                print(f"  mirror {mirror} failed: {e}", file=sys.stderr)
+                continue
+        raise RuntimeError(f"Failed to download {filename} from any mirror")
 
 
 def _fetch_decompressed(url: str, headers: Dict[str, str]) -> Optional[str]:
@@ -296,15 +329,27 @@ def _fmt_speed(bytes_per_sec: float) -> str:
     return _fmt_size(bytes_per_sec) + "/s"
 
 
-def _download(url: str, dest: Path, headers: Dict[str, str], label: str = ""):
+def _download(url: str, dest: Path, headers: Dict[str, str], label: str = "", resume: bool = False):
     tty = sys.stdout.isatty()
     req = Request(url, headers=headers)
     bar_width = 25
 
+    mode = "ab" if resume else "wb"
+    initial_offset = dest.stat().st_size if resume and dest.exists() else 0
+
     with urlopen(req, timeout=120) as resp:
-        total = int(resp.headers.get("Content-Length", 0))
-        with open(dest, "wb") as f:
-            downloaded = 0
+        code = resp.getcode() or 200
+        if code == 206 and resume:
+            pass
+        elif code == 416:
+            return
+        elif code == 200 and resume:
+            mode = "wb"
+            initial_offset = 0
+
+        total = int(resp.headers.get("Content-Length", 0)) + initial_offset
+        with open(dest, mode) as f:
+            downloaded = initial_offset
             start = time.time()
             last_draw = 0.0
 
