@@ -162,7 +162,7 @@ class RepositoryIndex:
 
     @classmethod
     def load(cls, path: Path) -> "RepositoryIndex":
-        import json
+        import json,sys
         idx = cls()
         try:
             data = json.loads(path.read_text())
@@ -170,8 +170,8 @@ class RepositoryIndex:
                 raw = d.pop("raw", {})
                 pkg = RepoPackage(**d, raw=raw)
                 idx.add([pkg])
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"!! failed to load cached index: {e}", file=sys.stderr)
         return idx
 
 

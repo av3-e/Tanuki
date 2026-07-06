@@ -9,6 +9,7 @@ import subprocess
 import concurrent.futures
 from pathlib import Path
 from typing import List, Optional, Set, Dict
+from datetime import datetime, timedelta
 
 from .output import (
     print_table, print_success, print_error, print_info, print_warning,
@@ -94,12 +95,12 @@ class Commands:
             if self._lock_fd:
                 try:
                     fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print_warning(f"Failed to unlock: {e}")
                 try:
                     self._lock_fd.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print_warning(f"Failed to close lock fd: {e}")
                 self._lock_fd = None
                 self._lock_count = 0
         else:
@@ -137,15 +138,15 @@ class Commands:
             try:
                 if full.is_file() or full.is_symlink():
                     full.unlink(missing_ok=True)
-            except Exception:
-                pass
+            except Exception as e:
+                print_warning(f"rollback: could not remove {fpath}: {e}")
         for orig, backup in self._transaction_conffiles:
             if backup and os.path.exists(backup):
                 try:
                     shutil.copy2(backup, orig)
                     Path(backup).unlink(missing_ok=True)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print_warning(f"rollback: could not restore {orig}: {e}")
         self._transaction_files = []
         self._transaction_conffiles = []
 
@@ -171,8 +172,8 @@ class Commands:
             try:
                 before = self.db.get_all_packages()
                 pre_snap.write_text("\n".join(f"{p.name}\t{p.version}\t{p.architecture}" for p in before))
-            except Exception:
-                pass
+            except Exception as e:
+                print_warning(f"could not save pre-install snapshot: {e}")
 
             host_pkgs = detect_host_packages(extra_lib_map=repo.lib_mapping or None)
             if host_pkgs:
@@ -374,8 +375,8 @@ class Commands:
             try:
                 rewrite_file_contents(root, f, path_rewrite)
                 rewrite_shebangs(root, f)
-            except Exception:
-                pass
+            except Exception as e:
+                print_warning(f"could not rewrite {f}: {e}")
 
         self._run_ldconfig(rewritten_files, root)
 
@@ -411,8 +412,8 @@ class Commands:
                 try:
                     if full.is_file() or full.is_symlink():
                         full.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print_warning(f"could not remove orphaned {of}: {e}")
 
         self._transaction_files = []
         self._transaction_conffiles = []
@@ -452,8 +453,8 @@ class Commands:
             try:
                 ldconfig = shutil.which("ldconfig") or "/sbin/ldconfig"
                 subprocess.run([ldconfig], timeout=30, capture_output=True)
-            except Exception:
-                pass
+            except Exception as e:
+                print_warning(f"ldconfig failed: {e}")
 
     def _run_script(self, name: str, script_type: str, content: str, action: str,
                     fatal: bool = False) -> bool:
@@ -467,8 +468,8 @@ class Commands:
             try:
                 shim_dir = setup_shim(self.db_path, arch)
                 self._shim_dir = shim_dir
-            except Exception:
-                pass
+            except Exception as e:
+                print_warning(f"dpkg shim setup failed: {e}")
         if shim_dir:
             bin_path = str(shim_dir / "bin")
             env["PATH"] = f"{bin_path}:{env.get('PATH', '')}"
@@ -623,6 +624,31 @@ class Commands:
             self._release_lock()
 
 
+    def _cleanup_stale_cache(self, max_age_days=7):
+        cache = self.cache_path
+        if not cache.exists():
+            return 0
+        cutoff = datetime.now() - timedelta(days=max_age_days)
+        count = 0
+        for f in cache.iterdir():
+            if f.is_file() and (f.name.endswith(".deb") or f.name.endswith(".part")):
+                try:
+                    mtime = datetime.fromtimestamp(f.stat().st_mtime)
+                    if mtime < cutoff:
+                        f.unlink()
+                        count += 1
+                except Exception as e:
+                    print_warning(f"could not clean stale {f.name}: {e}")
+        # also clean up any leftover partial downloads
+        for f in cache.iterdir():
+            if f.is_file() and f.name.endswith(".part"):
+                try:
+                    f.unlink()
+                    count += 1
+                except Exception as e:
+                    print_warning(f"could not remove partial {f.name}: {e}")
+        return count
+
     def clean(self):
         self._require_root()
         self._acquire_lock()
@@ -634,7 +660,8 @@ class Commands:
                     if f.is_file():
                         f.unlink()
                         count += 1
-                print_success(f"Cleaned {count} cached packages")
+                stale = self._cleanup_stale_cache(max_age_days=0)
+                print_success(f"Cleaned {count + stale} cached packages")
             else:
                 print_info("Cache directory is empty")
         finally:
@@ -665,6 +692,9 @@ class Commands:
                         count += 1
 
             print_success(f"Removed {count} stale packages from cache")
+            extra = self._cleanup_stale_cache()
+            if extra > 0:
+                print_info(f"(also cleaned {extra} time-stale packages)")
         finally:
             self._release_lock()
 
@@ -709,8 +739,11 @@ class Commands:
         repo.update()
         try:
             repo.index.save(self.db_path / "repo-index.json")
-        except Exception:
-            pass
+        except Exception as e:
+            print_warning(f"could not save repo index cache: {e}")
+        stale = self._cleanup_stale_cache()
+        if stale > 0:
+            print_info(f"Cleaned {stale} stale cached packages")
         print_success(f"Index updated ({len(repo.index)} packages loaded)")
 
 

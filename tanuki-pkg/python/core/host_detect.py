@@ -193,8 +193,9 @@ def _get_ldconfig_paths() -> Dict[str, str]:
                 m = re.match(r"^\s*(\S+)\s+\([^)]*\)\s*=>\s*(\S+)", line)
                 if m:
                     soname_to_path[m.group(1)] = m.group(2)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        import sys as _sys
+        print(f"ldconfig -p failed: {e}", file=_sys.stderr)
     return soname_to_path
 
 
