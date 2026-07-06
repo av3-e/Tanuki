@@ -22,13 +22,22 @@ def _fetch(url):
 
 def _get_ldconfig_map():
     m = {}
+    ldconfig = None
+    for candidate in ["ldconfig", "/sbin/ldconfig", "/usr/sbin/ldconfig"]:
+        if candidate == "ldconfig" or os.path.isfile(candidate):
+            ldconfig = candidate
+            break
+    if not ldconfig:
+        print("!! ldconfig not found", file=sys.stderr)
+        return m
     try:
-        p = subprocess.run(["ldconfig", "-p"], capture_output=True, text=True, timeout=30)
+        p = subprocess.run([ldconfig, "-p"], capture_output=True, text=True, timeout=30)
         if p.returncode == 0:
             for line in p.stdout.splitlines():
-                x = re.match(r"^\s*(\S+)\s+\([^)]*\)\s*=>\s*(\S+)", line)
+                x = re.match(r"^\s*(\S+)\s+\(([^)]*)\)\s*=>\s*(\S+)", line)
                 if x:
-                    m[x.group(1)] = x.group(2)
+                    pkg = x.group(2).split(",")[0].strip()
+                    m[x.group(1)] = pkg
     except Exception as e:
         print(f"!! ldconfig -p failed: {e}", file=sys.stderr)
     return m
@@ -101,7 +110,7 @@ def main():
     # try to fetch Contents from debian mirror for more soname mappings
     arch = "amd64"
     for a in ["amd64", "arm64", "i386"]:
-        u = f"https://deb.debian.org/debian/dists/stable/Contents-{a}.gz"
+        u = f"https://deb.debian.org/debian/dists/stable/main/Contents-{a}.gz"
         txt = _fetch(u)
         if txt:
             arch = a
