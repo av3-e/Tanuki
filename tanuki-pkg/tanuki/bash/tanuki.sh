@@ -63,8 +63,8 @@ if ! "$TANUKI_PYTHON" -c "import zstandard" 2>/dev/null && \
     echo "  Install python3-zstandard via your package manager."
 fi
 
-if ! "$TANUKI_PYTHON" -c "import lupa" 2>/dev/null; then
-    echo "Warning: Lua config parser disabled (install python3-lupa for full functionality)"
+if ! command -v lua &> /dev/null; then
+    echo "Warning: Lua config parser disabled (install lua for full functionality)"
 fi
 
 if [[ $# -eq 0 ]] || [[ "$1" == "--help" ]] || [[ "$1" == "-h" ]]; then

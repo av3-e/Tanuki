@@ -1,35 +1,29 @@
 import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 
 
 class LuaBridge:
 
     def __init__(self, config_path: Path):
         self.config_path = Path(config_path)
-        self._use_lua = False
-        self._lupa = None
-
-        try:
-            import lupa
-            self._lupa = lupa
-            self._use_lua = True
-        except ImportError:
-            pass
+        self._lua_bin = shutil.which("lua")
+        self._helper = Path(__file__).parent / "parse_config.lua"
 
     def load_config(self) -> dict:
         if not self.config_path.exists():
             return self._default_config()
 
-        if self._use_lua:
-            return self._load_with_lupa()
+        result = self._load_with_subprocess()
+        if result is not None:
+            return result
         return self._load_simple()
 
-    def _load_simple(self) -> dict:
+    def _parse_config_text(self, text: str) -> dict:
         config = self._default_config()
-        with open(self.config_path, "r") as f:
-            text = f.read()
 
         for key in ("mirror", "suite", "root", "arch", "components"):
             m = re.search(rf'{key}\s*=\s*"([^"]*)"', text)
@@ -50,33 +44,24 @@ class LuaBridge:
 
         return config
 
-    def _load_with_lupa(self) -> dict:
-        config = self._default_config()
+    def _load_simple(self) -> dict:
+        with open(self.config_path, "r") as f:
+            text = f.read()
+        return self._parse_config_text(text)
+
+    def _load_with_subprocess(self) -> Optional[dict]:
+        if not self._lua_bin or not self._helper.exists():
+            return None
         try:
-            with open(self.config_path, "r") as f:
-                code = f.read()
-
-            lua = self._lupa.LuaRuntime(unpack_returned_tuples=True)
-            lua.execute(code)
-            globals_table = lua.globals()
-
-            for key in ("mirror", "suite", "root", "arch", "components", "architectures"):
-                try:
-                    val = globals_table[key]
-                except KeyError:
-                    continue
-                if val is not None:
-                    if hasattr(val, "__iter__") and not isinstance(val, str):
-                        if hasattr(val, "__len__"):
-                            val = list(val)
-                        else:
-                            val = [str(val)]
-                    config[key] = val
-
-        except Exception:
-            return self._load_simple()
-
-        return config
+            result = subprocess.run(
+                [self._lua_bin, str(self._helper), str(self.config_path)],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode != 0:
+                return None
+            return self._parse_config_text(result.stdout)
+        except (subprocess.SubprocessError, OSError):
+            return None
 
     def _detect_arch(self) -> str:
         arch_env = os.environ.get("TANUKI_ARCH", "").lower()

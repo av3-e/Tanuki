@@ -12,7 +12,7 @@ no.
 
 ```
  Python 3.12+ 
- Lupa (python3-lupa, or whatever your distro ships. You can get it via pip I think, if not, arch linux ships it via python-lupa for example.)
+ lua (the interpreter, available from your distro's package manager)
 **Optional:**
 - ZTSD: for .zst compressed debs
 - gpgv: GPG verification
