@@ -13,7 +13,8 @@ from datetime import datetime, timedelta
 
 from .output import (
     print_table, print_success, print_error, print_info, print_warning,
-    prompt_yes_no,
+    prompt_yes_no, print_stage, print_sep, print_ruler,
+    Spinner, pretty_size,
 )
 from core.database import PackageDatabase, InstalledPackage
 from core.dependency import DependencySolver, _compare_versions
@@ -22,7 +23,7 @@ from core.host_detect import (
     detect_distro, detect_architecture, get_distro_family,
     make_path_rewrite,
 )
-from core.repository import Repository, RepositoryIndex, verify_checksum
+from core.repository import Repository, RepositoryIndex, RepoPackage, verify_checksum
 from core.package import DebPackage, ControlInfo, rewrite_file_contents, rewrite_shebangs
 
 TANUKI_ROOT = Path(os.environ.get(
@@ -184,7 +185,18 @@ class Commands:
             except Exception as e:
                 print_warning(f"could not save pre-install snapshot: {e}")
 
+            print_stage("Running transaction check")
+            print("  Detecting system packages...")
             host_pkgs = detect_host_packages(extra_lib_map=repo.lib_mapping or None)
+            print(f"  Detected {len(host_pkgs)} host packages")
+            if not force:
+                print("  Checking foreign package managers...")
+                foreign_files = get_foreign_pm_files()
+                if foreign_files:
+                    for pm in foreign_files:
+                        print(f"    {pm}: {len(foreign_files[pm])} files tracked")
+                else:
+                    print("    none found")
             if host_pkgs:
                 self.solver.load_installed(host_pkgs)
             installed_pkgs = self.db.get_all_packages()
@@ -195,9 +207,6 @@ class Commands:
             if host_pkgs:
                 self.solver.register_host_metadata(host_pkgs, repo.index)
             self.solver.with_recommends = with_recommends
-
-            if not force:
-                foreign_files = get_foreign_pm_files()
 
             for pkg_name in package_names:
                 arch = None
@@ -250,67 +259,105 @@ class Commands:
             print_info(f"Would install: {' '.join(to_install)}")
             return
 
-        print_info(f"Will install: {' '.join(to_install)}")
+        target_arch = self.config.get("arch", detect_architecture())
+
+        stuff = {}
+        for d in reversed(to_install):
+            cand = repo.index.get(d)
+            if not cand:
+                print_error(f"Package '{d}' resolved but not found in index")
+                continue
+            i = cand[0]
+            if target_arch:
+                m = [c for c in cand if c.architecture == target_arch]
+                if m:
+                    i = m[0]
+            stuff[d] = i
+
+        total_dl = sum(p.size for p in stuff.values())
+        total_inst = sum(p.installed_size for p in stuff.values())
+        print_stage("Transaction Summary")
+        for d in reversed(to_install):
+            i = stuff.get(d)
+            if not i:
+                continue
+            print(f"  Installing: {i.package} {i.architecture} "
+                  f"{i.version} ({pretty_size(i.size).strip()})")
+        print_sep()
+        w = "Package" if len(to_install) == 1 else "Packages"
+        print(f"  Install  {len(to_install)} {w}")
+        print(f"  Total download size: {pretty_size(total_dl).strip()}")
+        print(f"  Installed size:      {pretty_size(total_inst * 1024).strip()}")
+        print()
 
         if not prompt_yes_no("Proceed with installation?"):
             return
 
         cache_dir = self.cache_path
-
-        target_arch = self.config.get("arch", detect_architecture())
-        to_download = []
-        for dep_name in reversed(to_install):
-            dep_candidates = repo.index.get(dep_name)
-            if not dep_candidates:
-                print_error(f"Package '{dep_name}' resolved but not found in index")
+        need_dl = []
+        for d in reversed(to_install):
+            i = stuff.get(d)
+            if not i:
                 continue
-            dep_info = dep_candidates[0]
-            if target_arch:
-                arch_match = [c for c in dep_candidates if c.architecture == target_arch]
-                if arch_match:
-                    dep_info = arch_match[0]
-            deb_path = cache_dir / Path(dep_info.filename).name
-            if not deb_path.exists():
-                to_download.append((dep_info.filename, dep_name))
+            if not (cache_dir / Path(i.filename).name).exists():
+                need_dl.append(i)
 
-        if to_download:
-            print_info(f"Downloading {len(to_download)} packages...")
+        if need_dl:
+            print_stage("Downloading Packages")
+            n = len(need_dl)
+            total_bytes = sum(p.size for p in need_dl)
+            dlbar = ProgressBar(prefix="Total", total=total_bytes)
+            dlbar.start_timer()
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-                futs = []
-                for fname, dname in to_download:
-                    futs.append(pool.submit(repo.download_deb, fname, cache_dir, dname))
-                for fut in concurrent.futures.as_completed(futs):
+                jobs = {}
+                for idx, i in enumerate(need_dl, 1):
+                    cnt = f"({idx}/{n}) "
+                    jobs[pool.submit(
+                        repo.download_deb, i.filename, cache_dir,
+                        label=Path(i.filename).name, counter=cnt,
+                    )] = i
+                for fut in concurrent.futures.as_completed(jobs):
                     try:
-                        fut.result()
+                        p = fut.result()
+                        if p and p.exists():
+                            dlbar.update(p.stat().st_size)
                     except Exception as e:
                         print_warning(f"Download failed: {e}")
+            dlbar.finish()
+            print_sep()
+            print()
 
-        for dep_name in reversed(to_install):
-            dep_candidates = repo.index.get(dep_name)
-            if not dep_candidates:
+        n_pkgs = len(to_install)
+        installed_list = []
+        for idx, d in enumerate(reversed(to_install), 1):
+            i = stuff.get(d)
+            if not i:
                 continue
-            dep_info = dep_candidates[0]
-            if target_arch:
-                arch_match = [c for c in dep_candidates if c.architecture == target_arch]
-                if arch_match:
-                    dep_info = arch_match[0]
-            deb_path = cache_dir / Path(dep_info.filename).name
+            deb_path = cache_dir / Path(i.filename).name
 
             if not deb_path.exists():
-                print_error(f"Download failed for {dep_name}")
+                print_error(f"Download failed for {d}")
                 continue
 
             if download_only:
-                print_info(f"Downloaded {dep_name} (download-only mode)")
+                print_info(f"Downloaded {d} (download-only mode)")
                 continue
 
-            is_explicit = explicit and (dep_name == name.lower())
-            self._install_deb(deb_path, dep_info, explicit=is_explicit,
+            is_explicit = explicit and (d == name.lower())
+            label = f"{i.package}_{i.version}_{i.architecture}"
+            print(f"  Installing: {label:<52s} {idx}/{n_pkgs}")
+            self._install_deb(deb_path, i, explicit=is_explicit,
                                force=force, foreign_files=foreign_files)
+            installed_list.append(label)
 
         if not download_only:
             self.db.write_pkg_list()
-            print_success(f"Installation complete")
+            print()
+            print_stage("Installed")
+            for l in installed_list:
+                print(f"  {l}")
+            print()
+            print_success("Installation complete")
 
     def _install_deb(self, deb_path: Path, repo_info=None, explicit: bool = True,
                      force: bool = False, foreign_files: Dict[str, Set[str]] = None):

@@ -14,6 +14,8 @@ from typing import Optional, Dict, List, Iterator
 from urllib.request import urlopen, Request
 from urllib.parse import urljoin
 
+from cli.output import print_stage, ProgressBar
+
 
 @dataclass
 class RepoPackage:
@@ -227,30 +229,40 @@ class Repository:
                 continue
             self.lib_mapping.update(_parse_contents_libs(text, arch))
 
-    def _try_mirrors(self, url_fn, *args, headers=None) -> Optional[str]:
+    def _try_mirrors(self, url_fn, *args, headers=None,
+                     progress_bar: ProgressBar | None = None) -> Optional[str]:
         mirrors = [self.base_url] + [m for m in self.fallbacks if m != self.base_url]
         for mirror in mirrors:
             url = url_fn(*args, mirror=mirror)
-            text = _fetch_decompressed(url, headers or {})
+            text = _fetch_decompressed(url, headers or {}, progress_bar=progress_bar)
             if text is not None:
                 self._current_mirror = mirror
                 return text
         return None
 
     def update(self):
+        print_stage("Downloading repository index")
         self.index = RepositoryIndex()
-        headers = {"User-Agent": "Tanuki/0.2.0"}
+        hdrs = {"User-Agent": "Tanuki/0.2.0"}
 
+        n = len(self.components) * len(self.architectures)
+        k = 0
         for comp in self.components:
             for arch in self.architectures:
-                text = self._try_mirrors(self._packages_url, comp, arch, headers=headers)
-                if text is None:
-                    text = self._try_mirrors(self._packages_gz_url, comp, arch, headers=headers)
-                if text is None:
+                k += 1
+                bar = ProgressBar(prefix=f"{comp}/{arch}".ljust(24), counter=f"({k}/{n}) ")
+                bar.start_timer()
+                txt = self._try_mirrors(self._packages_url, comp, arch, headers=hdrs, progress_bar=bar)
+                if txt is None:
+                    txt = self._try_mirrors(self._packages_gz_url, comp, arch, headers=hdrs, progress_bar=bar)
+                if txt is None:
                     print(f"Warning: no index for {comp}/{arch}", file=sys.stderr)
+                    bar.finish()
                     continue
-                packages = parse_packages(text)
-                self.index.add(packages)
+                bar.total = len(txt.encode("utf-8"))
+                bar.update(bar.total)
+                bar.finish()
+                self.index.add(parse_packages(txt))
 
         self._fetch_lib_mapping()
 
@@ -277,7 +289,8 @@ class Repository:
               file=sys.stderr)
         return False
 
-    def download_deb(self, filename: str, dest: Path, label: str = "") -> Path:
+    def download_deb(self, filename: str, dest: Path, label: str = "",
+                      counter: str = "") -> Path:
         dest.mkdir(parents=True, exist_ok=True)
         local_name = dest / Path(filename).name
         headers = {"User-Agent": "Tanuki/0.2.0"}
@@ -291,7 +304,8 @@ class Repository:
         for mirror in mirrors:
             url = self._deb_url(filename, mirror=mirror)
             try:
-                _download(url, local_name, headers, label=label, resume=("Range" in headers))
+                _download(url, local_name, headers, label=label, resume=("Range" in headers),
+                          counter=counter)
                 if local_name.exists() and local_name.stat().st_size > 0:
                     self._current_mirror = mirror
                     return local_name
@@ -301,11 +315,23 @@ class Repository:
         raise RuntimeError(f"Failed to download {filename} from any mirror")
 
 
-def _fetch_decompressed(url: str, headers: Dict[str, str]) -> Optional[str]:
+def _fetch_decompressed(url: str, headers: Dict[str, str],
+                        progress_bar: ProgressBar | None = None) -> Optional[str]:
     try:
         req = Request(url, headers=headers)
         with urlopen(req, timeout=30) as resp:
-            data = resp.read()
+            total = int(resp.headers.get("Content-Length", 0))
+            if progress_bar is not None:
+                progress_bar.total = total
+            chunks = []
+            while True:
+                chunk = resp.read(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                if progress_bar is not None:
+                    progress_bar.update(len(chunk))
+            data = b"".join(chunks)
         if url.endswith(".gz"):
             return gzip.decompress(data).decode("utf-8", errors="replace")
         elif url.endswith(".xz"):
@@ -317,19 +343,20 @@ def _fetch_decompressed(url: str, headers: Dict[str, str]) -> Optional[str]:
 
 
 
-def _fmt_size(n: float) -> str:
-    for unit in ("B", "K", "M", "G"):
+def _size(n):
+    for u in ("B", "K", "M", "G"):
         if abs(n) < 1024:
-            return f"{n:5.1f} {unit}"
+            return f"{n:5.1f} {u}"
         n /= 1024
     return f"{n:5.1f} T"
 
 
-def _fmt_speed(bytes_per_sec: float) -> str:
-    return _fmt_size(bytes_per_sec) + "/s"
+def _speed(bps):
+    return _size(bps) + "/s"
 
 
-def _download(url: str, dest: Path, headers: Dict[str, str], label: str = "", resume: bool = False):
+def _download(url: str, dest: Path, headers: Dict[str, str], label: str = "",
+              resume: bool = False, counter: str = ""):
     tty = sys.stdout.isatty()
     req = Request(url, headers=headers)
     bar_width = 25
@@ -381,9 +408,9 @@ def _download(url: str, dest: Path, headers: Dict[str, str], label: str = "", re
                         eta_str = f"{eta_m:02d}:{eta_s:02d}"
 
                     line = (
-                        f"\r  {label:<24s} {bar} {pct*100:3.0f}%  "
-                        f"{_fmt_speed(speed)}  "
-                        f"{_fmt_size(downloaded)}/{_fmt_size(total)}  "
+                        f"\r  {counter}{label:<24s} {bar} {pct*100:3.0f}%  "
+                        f"{_speed(speed)}  "
+                        f"{_size(downloaded)}/{_size(total)}  "
                         f"{eta_str}"
                     )
 
