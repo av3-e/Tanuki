@@ -39,6 +39,7 @@ def print_help():
     print(f"    {_color('green', 'list, ls')}     [--files] [pkg]    List packages (or files)")
     print(f"    {_color('green', 'files, fl')}    [pkg]              Show files of a package")
     print(f"    {_color('green', 'verify')}       [pkg]              Verify installed files")
+    print(f"    {_color('green', 'count, c')}                         Show installed package count")
     print(f"    {_color('green', 'undo, rollback')}                  Undo last install operation")
     print(f"    {_color('green', 'search')}        <query>           Search repositories")
     print(f"    {_color('green', 'info')}          <pkg>             Show package details")

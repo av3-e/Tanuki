@@ -177,7 +177,7 @@ class RepositoryIndex:
 
 class Repository:
 
-    def __init__(self, base_url: str, suite: str = "forky",
+    def __init__(self, base_url: str, suite: str = "sid",
                  components: List[str] = None,
                  architectures: List[str] = None,
                  fallbacks: Optional[List[str]] = None):

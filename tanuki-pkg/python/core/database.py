@@ -103,29 +103,37 @@ CREATE TABLE IF NOT EXISTS package_triggers (
 class PackageDatabase:
     def __init__(self, root: Path):
         self.root = Path(root)
-        try:
-            self.root.mkdir(parents=True, exist_ok=True)
-        except PermissionError:
+        if not self._ensure_root_writable():
             fallback = Path.home() / ".local/share/tanuki"
-            try:
-                fallback.mkdir(parents=True, exist_ok=True)
-            except PermissionError:
-                fallback = Path("/tmp/tanuki-db")
-                fallback.mkdir(parents=True, exist_ok=True)
             self.root = fallback
+            if not self._ensure_root_writable():
+                self.root = Path("/tmp/tanuki-db")
+                self._ensure_root_writable()
         self.db_path = self.root / "tanuki.db"
         self._init_db()
 
-    def _init_db(self):
+    def _ensure_root_writable(self) -> bool:
         try:
-            conn = sqlite3.connect(str(self.db_path))
-        except PermissionError:
+            self.root.mkdir(parents=True, exist_ok=True)
+            testfile = self.root / ".write_test"
+            testfile.touch()
+            testfile.unlink()
+            return True
+        except (PermissionError, OSError):
+            return False
+
+    def _init_db(self):
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            conn.executescript(SCHEMA)
+        except sqlite3.OperationalError:
+            conn.close()
             fallback = Path("/tmp/tanuki-db")
             fallback.mkdir(parents=True, exist_ok=True)
             self.root = fallback
             self.db_path = fallback / "tanuki.db"
             conn = sqlite3.connect(str(self.db_path))
-        conn.executescript(SCHEMA)
+            conn.executescript(SCHEMA)
         try:
             conn.execute("ALTER TABLE packages ADD COLUMN explicit INTEGER DEFAULT 1")
         except sqlite3.OperationalError:
@@ -478,6 +486,26 @@ class PackageDatabase:
             return [r["name"] for r in rows]
         finally:
             conn.close()
+
+    def package_count(self):
+        c = self._connect()
+        r = c.execute("select count(*) from packages").fetchone()
+        c.close()
+        return r[0]
+
+    def installed_list(self):
+        c = self._connect()
+        rows = c.execute("select name from packages").fetchall()
+        c.close()
+        return [r["name"] for r in rows]
+
+    def write_pkg_list(self):
+        pkgs = self.installed_list()
+        f = self.root / "packages.list"
+        if pkgs:
+            f.write_text("\n".join(pkgs) + "\n")
+        else:
+            f.write_text("")
 
     def get_package_files_for_verification(self) -> List[Dict]:
         conn = self._connect()

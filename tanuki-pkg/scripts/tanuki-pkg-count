@@ -1,0 +1,8 @@
+#!/bin/sh
+TANUKI_DB="${TANUKI_ROOT:-/var/lib/tanuki}"
+F="$TANUKI_DB/packages.list"
+if [ "$1" = "--list" ]; then
+  test -f "$F" && cat "$F"
+else
+  test -f "$F" && wc -l < "$F" || echo 0
+fi

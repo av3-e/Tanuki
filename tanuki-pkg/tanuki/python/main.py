@@ -76,6 +76,8 @@ def main():
             cmd.update()
         elif command in ['upgrade', '-U']:
             cmd.upgrade(force=flags["force"])
+        elif command in ('count', 'c', '-c', '--count'):
+            cmd.count()
         elif command in ['list', 'ls']:
             cmd.list_packages(show_files=flags["files"],
                               pkg_name=cmd_args[0] if cmd_args else None)

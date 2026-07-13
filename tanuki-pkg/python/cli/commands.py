@@ -38,12 +38,21 @@ TANUKI_CACHE = Path(os.environ.get(
 def _ensure_dir(path: Path, fallback: Path = None) -> Path:
     try:
         path.mkdir(parents=True, exist_ok=True)
-        return path
+        if os.access(path, os.W_OK):
+            return path
     except PermissionError:
-        if fallback is None:
-            fallback = Path.home() / ".local/share/tanuki"
+        pass
+    if fallback is None:
+        fallback = Path.home() / ".local/share/tanuki"
+    try:
         fallback.mkdir(parents=True, exist_ok=True)
-        return fallback
+        if os.access(fallback, os.W_OK):
+            return fallback
+    except PermissionError:
+        pass
+    tmpfall = Path("/tmp/tanuki-db")
+    tmpfall.mkdir(parents=True, exist_ok=True)
+    return tmpfall
 
 
 class Commands:
@@ -109,7 +118,7 @@ class Commands:
     def _get_repo(self) -> Repository:
         if self.repo is None:
             mirror = self.config.get("mirror", "https://deb.debian.org/debian")
-            suite = self.config.get("suite", "forky")
+            suite = self.config.get("suite", "sid")
             components = self.config.get("components",
                                             ["main", "contrib", "non-free-firmware", "non-free"])
             architectures = self.config.get("architectures",
@@ -300,6 +309,7 @@ class Commands:
                                force=force, foreign_files=foreign_files)
 
         if not download_only:
+            self.db.write_pkg_list()
             print_success(f"Installation complete")
 
     def _install_deb(self, deb_path: Path, repo_info=None, explicit: bool = True,
@@ -619,6 +629,7 @@ class Commands:
                 self._install_deb(deb_path, dep_info, force=force,
                                    foreign_files=foreign_files)
 
+            self.db.write_pkg_list()
             print_success("Upgrade complete")
         finally:
             self._release_lock()
@@ -801,6 +812,7 @@ class Commands:
             self._run_script(name, "postrm", scripts["postrm"], "remove")
 
         self.db.remove_package(name)
+        self.db.write_pkg_list()
         print_success(f"Removed {name}")
 
 
@@ -826,6 +838,9 @@ class Commands:
         data = [[p.name, p.version, p.architecture] for p in packages]
         print_table(["Package", "Version", "Arch"], data)
 
+
+    def count(self):
+        print(self.db.package_count())
 
     def verify(self, pkg_name: Optional[str] = None):
         import hashlib as _hl
@@ -997,7 +1012,7 @@ class Commands:
             detected_arch = detect_architecture()
             config_path.write_text(
                 f'mirror = "https://deb.debian.org/debian"\n'
-                f'suite = "forky"\n'
+                f'suite = "sid"\n'
                 f'arch = "{detected_arch}"\n'
                 f'components = {{ "main", "contrib", "non-free-firmware", "non-free" }}\n'
                 f'architectures = {{ "{detected_arch}" }}\n'

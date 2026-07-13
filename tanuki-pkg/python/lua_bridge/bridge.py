@@ -107,7 +107,7 @@ class LuaBridge:
                         return f"v{ver}"
         except (FileNotFoundError, PermissionError):
             pass
-        return "forky"
+        return "sid"
 
     def _default_config(self) -> dict:
         return {
